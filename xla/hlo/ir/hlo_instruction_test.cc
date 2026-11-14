@@ -1395,6 +1395,138 @@ ENTRY %main (p0: f32[], p1: f32[]) -> (f32[], f32[]) {
                   HasSubstr("has shape index {0,0} that is invalid")));
 }
 
+absl::StatusOr<HloInstructionProto*> FindInstructionProto(
+    HloModuleProto& module_proto, absl::string_view name) {
+  for (HloComputationProto& computation :
+       *module_proto.mutable_computations()) {
+    for (HloInstructionProto& instruction :
+         *computation.mutable_instructions()) {
+      if (instruction.name() == name) {
+        return &instruction;
+      }
+    }
+  }
+  return absl::NotFoundError(name);
+}
+
+constexpr absl::string_view kScanHlo = R"hlo(
+HloModule m
+
+add {
+  lhs = f32[] parameter(0)
+  rhs = f32[] parameter(1)
+  add = f32[] add(lhs, rhs)
+  ROOT t = (f32[], f32[]) tuple(add, add)
+}
+
+ENTRY main {
+  input = f32[4] parameter(0)
+  init = f32[] constant(0)
+  ROOT scan = (f32[4], f32[]) scan(input, init), dimensions={0}, num_carries=1, to_apply=add
+}
+)hlo";
+
+TEST_F(HloInstructionTest, ScanFromProtoRoundTrip) {
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                       ParseAndReturnVerifiedModule(kScanHlo));
+  ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<HloModule> round_trip,
+      HloModule::CreateFromProto(module->ToProto(), module->config()));
+  EXPECT_THAT(FindInstruction(round_trip.get(), "scan")->dimensions(),
+              ElementsAre(0));
+}
+
+TEST_F(HloInstructionTest, ScanFromProtoWithoutDimensionIsRejected) {
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                       ParseAndReturnVerifiedModule(kScanHlo));
+  HloModuleProto proto = module->ToProto();
+  ASSERT_OK_AND_ASSIGN(HloInstructionProto* scan,
+                       FindInstructionProto(proto, "scan"));
+  scan->clear_dimensions();
+  EXPECT_THAT(HloModule::CreateFromProto(proto, module->config()),
+              StatusIs(absl::StatusCode::kInternal,
+                       HasSubstr("Scan instruction should have 1 dimension but "
+                                 "sees 0")));
+}
+
+TEST_F(HloInstructionTest, ScanFromProtoWithTwoDimensionsIsRejected) {
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                       ParseAndReturnVerifiedModule(kScanHlo));
+  HloModuleProto proto = module->ToProto();
+  ASSERT_OK_AND_ASSIGN(HloInstructionProto* scan,
+                       FindInstructionProto(proto, "scan"));
+  scan->add_dimensions(0);
+  EXPECT_THAT(HloModule::CreateFromProto(proto, module->config()),
+              StatusIs(absl::StatusCode::kInternal,
+                       HasSubstr("Scan instruction should have 1 dimension but "
+                                 "sees 2")));
+}
+
+constexpr absl::string_view kScatterHlo = R"hlo(
+HloModule m
+
+add {
+  lhs = f32[] parameter(0)
+  rhs = f32[] parameter(1)
+  ROOT add = f32[] add(lhs, rhs)
+}
+
+add2 {
+  lhs.0 = f32[] parameter(0)
+  lhs.1 = f32[] parameter(1)
+  rhs.0 = f32[] parameter(2)
+  rhs.1 = f32[] parameter(3)
+  add.0 = f32[] add(lhs.0, rhs.0)
+  add.1 = f32[] add(lhs.1, rhs.1)
+  ROOT t = (f32[], f32[]) tuple(add.0, add.1)
+}
+
+ENTRY main {
+  operand = f32[3,3] parameter(0)
+  indices = s32[2] parameter(1)
+  updates = f32[2,3] parameter(2)
+  scatter = f32[3,3] scatter(operand, indices, updates), to_apply=add, update_window_dims={1}, inserted_window_dims={0}, scatter_dims_to_operand_dims={0}, index_vector_dim=1
+  scatter2 = (f32[3,3], f32[3,3]) scatter(operand, operand, indices, updates, updates), to_apply=add2, update_window_dims={1}, inserted_window_dims={0}, scatter_dims_to_operand_dims={0}, index_vector_dim=1
+  ROOT t = (f32[3,3], (f32[3,3], f32[3,3])) tuple(scatter, scatter2)
+}
+)hlo";
+
+TEST_F(HloInstructionTest, ScatterFromProtoRoundTrip) {
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                       ParseAndReturnVerifiedModule(kScatterHlo));
+  ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<HloModule> round_trip,
+      HloModule::CreateFromProto(module->ToProto(), module->config()));
+  EXPECT_EQ(FindInstruction(round_trip.get(), "scatter")->operand_count(), 3);
+  EXPECT_EQ(FindInstruction(round_trip.get(), "scatter2")->operand_count(), 5);
+}
+
+TEST_F(HloInstructionTest, ScatterFromProtoWithoutOperandsIsRejected) {
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                       ParseAndReturnVerifiedModule(kScatterHlo));
+  HloModuleProto proto = module->ToProto();
+  ASSERT_OK_AND_ASSIGN(HloInstructionProto* scatter,
+                       FindInstructionProto(proto, "scatter"));
+  scatter->clear_operand_ids();
+  EXPECT_THAT(HloModule::CreateFromProto(proto, module->config()),
+              StatusIs(absl::StatusCode::kInternal,
+                       HasSubstr("Scatter instruction should have an odd "
+                                 "number of operands but sees 0")));
+}
+
+TEST_F(HloInstructionTest, ScatterFromProtoWithEvenOperandCountIsRejected) {
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                       ParseAndReturnVerifiedModule(kScatterHlo));
+  HloModuleProto proto = module->ToProto();
+  ASSERT_OK_AND_ASSIGN(HloInstructionProto* scatter,
+                       FindInstructionProto(proto, "scatter"));
+  scatter->mutable_operand_ids()->RemoveLast();
+  EXPECT_THAT(HloModule::CreateFromProto(proto, module->config()),
+              StatusIs(absl::StatusCode::kInternal,
+                       HasSubstr("Scatter instruction should have an odd "
+                                 "number of operands but sees 2")));
+}
+
 // Deserializes an in-place collective-permute proto with `operand_count`
 // operands and the given flat `slice_sizes`, and returns the slice sizes of the
 // resulting instruction. The buffer operands have shape `buffer_shape` and the

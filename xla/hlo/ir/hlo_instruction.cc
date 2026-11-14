@@ -674,6 +674,9 @@ absl::StatusOr<std::unique_ptr<HloInstruction>> HloInstruction::CreateFromProto(
       TF_RET_CHECK(proto.called_computation_ids_size() == 1)
           << "Scan instruction should have 1 called computation but sees "
           << proto.called_computation_ids_size();
+      TF_RET_CHECK(proto.dimensions_size() == 1)
+          << "Scan instruction should have 1 dimension but sees "
+          << proto.dimensions_size();
       int64_t num_carries = proto.num_carries();
       TF_RET_CHECK(num_carries >= 0 && num_carries <= proto.operand_ids_size());
       int64_t num_inputs = proto.operand_ids_size() - num_carries;
@@ -1223,6 +1226,10 @@ absl::StatusOr<std::unique_ptr<HloInstruction>> HloInstruction::CreateFromProto(
       TF_RET_CHECK(proto.called_computation_ids_size() == 1)
           << "Scatter instruction should have 1 called computation but sees "
           << proto.called_computation_ids_size();
+      TF_RET_CHECK(proto.operand_ids_size() % 2 == 1)
+          << "Scatter instruction should have an odd number of operands but "
+             "sees "
+          << proto.operand_ids_size();
       auto scatter_dimension_numbers =
           std::make_unique<ScatterDimensionNumbers>(
               proto.scatter_dimension_numbers());
